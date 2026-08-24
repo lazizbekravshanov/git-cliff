@@ -569,11 +569,18 @@ fn resolve_config_path(
     match config {
         Some(path) if path.exists() => Some(path.to_path_buf()),
         Some(_) => user_config(),
-        None => workdir
-            .unwrap_or(current_dir)
-            .ancestors()
-            .find_map(Config::retrieve_project_config_path)
-            .or_else(user_config),
+        None => {
+            // A relative `--workdir` is resolved against the current directory
+            // so that discovery walks the same ancestors an absolute one would.
+            let search_root = workdir.map_or_else(
+                || current_dir.to_path_buf(),
+                |workdir| current_dir.join(workdir),
+            );
+            search_root
+                .ancestors()
+                .find_map(Config::retrieve_project_config_path)
+                .or_else(user_config)
+        }
     }
 }
 
@@ -1005,4 +1012,50 @@ pub fn write_changelog<W: io::Write>(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use temp_dir::TempDir;
+
+    use super::*;
+
+    /// Creates a `cliff.toml` in the given directory and returns its path.
+    fn write_config(dir: &Path) -> Result<PathBuf> {
+        let path = dir.join(DEFAULT_CONFIG);
+        fs::write(&path, "[changelog]\n")?;
+        Ok(path)
+    }
+
+    #[test]
+    fn absolute_workdir_is_used_for_discovery() -> Result<()> {
+        let current_dir = TempDir::new()?;
+        let workdir = current_dir.path().join("project");
+        fs::create_dir(&workdir)?;
+        let config = write_config(&workdir)?;
+        assert_eq!(
+            Some(config),
+            resolve_config_path(None, Some(&workdir), current_dir.path(), || None)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn relative_workdir_is_resolved_against_the_current_directory() -> Result<()> {
+        let current_dir = TempDir::new()?;
+        let workdir = current_dir.path().join("project");
+        fs::create_dir(&workdir)?;
+        let config = write_config(&workdir)?;
+        // `--workdir project` names the same directory as the absolute path
+        // above, so discovery has to reach the same configuration file.
+        assert_eq!(
+            Some(config),
+            resolve_config_path(None, Some(Path::new("project")), current_dir.path(), || {
+                None
+            })
+        );
+        Ok(())
+    }
 }
