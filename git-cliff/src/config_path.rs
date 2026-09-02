@@ -23,11 +23,20 @@ pub fn resolve_config_path(
     match config {
         Some(path) if path.exists() => Some(path.to_path_buf()),
         Some(_) => user_config(),
-        None => workdir
-            .unwrap_or(current_dir)
-            .ancestors()
-            .find_map(Config::retrieve_project_config_path)
-            .or_else(user_config),
+        None => {
+            // A relative `--workdir` is resolved against the current directory
+            // so that discovery walks the same ancestors an absolute one does.
+            // `Path::join` replaces rather than appends for an absolute value,
+            // so both spellings take this path.
+            let search_root = workdir.map_or_else(
+                || current_dir.to_path_buf(),
+                |workdir| current_dir.join(workdir),
+            );
+            search_root
+                .ancestors()
+                .find_map(Config::retrieve_project_config_path)
+                .or_else(user_config)
+        }
     }
 }
 
@@ -104,6 +113,30 @@ mod tests {
         assert_eq!(
             Some(config),
             resolve_config_path(None, Some(workdir.path()), current_dir.path(), || None)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_relative_workdir_discovers_the_same_config_as_an_absolute_one() -> Result<()> {
+        let current_dir = temp_dir()?;
+        let project = current_dir.path().join("project");
+        fs::create_dir(&project)?;
+        // The configuration sits in the parent, so finding it requires the
+        // ancestor walk to continue past the working directory. A relative
+        // path only walks its own components, so it must be resolved first.
+        let config = write_config(current_dir.path())?;
+        assert_eq!(
+            Some(config.clone()),
+            resolve_config_path(None, Some(Path::new("project")), current_dir.path(), || {
+                None
+            }),
+            "a relative --workdir should resolve against the current directory"
+        );
+        assert_eq!(
+            Some(config),
+            resolve_config_path(None, Some(&project), current_dir.path(), || None),
+            "the absolute spelling of the same directory should agree"
         );
         Ok(())
     }
